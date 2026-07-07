@@ -1,4 +1,4 @@
-use directories::ProjectDirs;
+use directories::BaseDirs;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fs;
@@ -9,6 +9,7 @@ use thiserror::Error;
 
 pub const SCHEMA_VERSION: u32 = 1;
 pub const SKILL_FILE_NAME: &str = "SKILL.md";
+pub const APP_IDENTIFIER: &str = "dev.skillslist.app";
 
 #[derive(Debug, Error)]
 pub enum SkillsError {
@@ -107,6 +108,13 @@ pub struct InstallationOutcome {
     pub command_previews: Vec<InstallCommandPreview>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CommandExecutionMode {
+    PreviewOnly,
+    Captured,
+    InteractiveTerminal,
+}
+
 #[derive(Clone, Debug)]
 pub struct AppPaths {
     pub data_dir: PathBuf,
@@ -131,9 +139,8 @@ impl AppPaths {
     }
 
     pub fn default_data_dir() -> Result<PathBuf> {
-        let dirs = ProjectDirs::from("dev", "skills-list", "skills-list")
-            .ok_or(SkillsError::MissingDataDir)?;
-        Ok(dirs.data_dir().to_path_buf())
+        let dirs = BaseDirs::new().ok_or(SkillsError::MissingDataDir)?;
+        Ok(dirs.data_dir().join(APP_IDENTIFIER))
     }
 }
 
@@ -350,7 +357,7 @@ impl SkillsStore {
         project_path: Option<PathBuf>,
         target_path: Option<PathBuf>,
         overwrite: bool,
-        execute_commands: bool,
+        command_mode: CommandExecutionMode,
     ) -> Result<InstallationOutcome> {
         let skill = self.find_skill(skill_ref)?.clone();
         let target_dir = resolve_target_dir(project_path.as_deref(), target_path.as_deref())?;
@@ -363,7 +370,7 @@ impl SkillsStore {
             &skill,
             project_path.as_deref(),
             overwrite,
-            execute_commands,
+            command_mode,
             &mut outcome,
         )?;
         Ok(outcome)
@@ -392,7 +399,7 @@ impl SkillsStore {
         project_path: Option<PathBuf>,
         target_path: Option<PathBuf>,
         overwrite: bool,
-        execute_commands: bool,
+        command_mode: CommandExecutionMode,
     ) -> Result<InstallationOutcome> {
         let group = self.find_group(group_ref)?;
         let target_dir = resolve_target_dir(project_path.as_deref(), target_path.as_deref())?;
@@ -408,7 +415,7 @@ impl SkillsStore {
                 &skill,
                 project_path.as_deref(),
                 overwrite,
-                execute_commands,
+                command_mode,
                 &mut outcome,
             )?;
         }
@@ -421,7 +428,7 @@ impl SkillsStore {
         skill: &Skill,
         project_path: Option<&Path>,
         overwrite: bool,
-        execute_commands: bool,
+        command_mode: CommandExecutionMode,
         outcome: &mut InstallationOutcome,
     ) -> Result<()> {
         match skill.source_type {
@@ -453,21 +460,34 @@ impl SkillsStore {
             }
             SourceType::Command => {
                 let command = skill.install_command.clone().unwrap_or_default();
-                if execute_commands {
-                    run_install_command(&command, project_path)?;
-                    outcome.installed_skills.push(InstalledSkill {
-                        skill_id: skill.id.clone(),
-                        skill_name: skill.name.clone(),
-                        target_path: None,
-                        command: Some(command),
-                        executed: true,
-                    });
-                } else {
-                    outcome.command_previews.push(InstallCommandPreview {
-                        skill_id: skill.id.clone(),
-                        skill_name: skill.name.clone(),
-                        command,
-                    });
+                match command_mode {
+                    CommandExecutionMode::PreviewOnly => {
+                        outcome.command_previews.push(InstallCommandPreview {
+                            skill_id: skill.id.clone(),
+                            skill_name: skill.name.clone(),
+                            command,
+                        });
+                    }
+                    CommandExecutionMode::Captured => {
+                        run_install_command_captured(&command, project_path)?;
+                        outcome.installed_skills.push(InstalledSkill {
+                            skill_id: skill.id.clone(),
+                            skill_name: skill.name.clone(),
+                            target_path: None,
+                            command: Some(command),
+                            executed: true,
+                        });
+                    }
+                    CommandExecutionMode::InteractiveTerminal => {
+                        run_install_command_interactive(&command, project_path)?;
+                        outcome.installed_skills.push(InstalledSkill {
+                            skill_id: skill.id.clone(),
+                            skill_name: skill.name.clone(),
+                            target_path: None,
+                            command: Some(command),
+                            executed: true,
+                        });
+                    }
                 }
             }
         }
@@ -623,7 +643,7 @@ fn resolve_target_dir(project_path: Option<&Path>, target_path: Option<&Path>) -
     Ok(project.join(".agents").join("skills"))
 }
 
-fn run_install_command(command: &str, project_path: Option<&Path>) -> Result<()> {
+fn install_command_process(command: &str, project_path: Option<&Path>) -> Command {
     let mut process = if cfg!(windows) {
         let mut command_process = Command::new("cmd");
         command_process.args(["/C", command]);
@@ -638,6 +658,23 @@ fn run_install_command(command: &str, project_path: Option<&Path>) -> Result<()>
         process.current_dir(project_path);
     }
 
+    process
+}
+
+fn run_install_command_interactive(command: &str, project_path: Option<&Path>) -> Result<()> {
+    let mut process = install_command_process(command, project_path);
+    let status = process.status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(SkillsError::CommandFailed(format!(
+            "command exited with status {status}"
+        )))
+    }
+}
+
+fn run_install_command_captured(command: &str, project_path: Option<&Path>) -> Result<()> {
+    let mut process = install_command_process(command, project_path);
     let output = process.output()?;
     if output.status.success() {
         Ok(())
@@ -753,6 +790,13 @@ mod tests {
     }
 
     #[test]
+    fn default_data_dir_matches_tauri_app_identifier() {
+        let data_dir = AppPaths::default_data_dir().unwrap();
+
+        assert_eq!(data_dir.file_name().unwrap(), APP_IDENTIFIER);
+    }
+
+    #[test]
     fn discovers_nested_skill_folders() {
         let temp = tempdir().unwrap();
         write_skill(&temp.path().join("one"), "One");
@@ -794,7 +838,13 @@ mod tests {
         store.add_skill_to_group("starter", "install-me").unwrap();
 
         let outcome = store
-            .install_group("starter", Some(project.clone()), None, false, false)
+            .install_group(
+                "starter",
+                Some(project.clone()),
+                None,
+                false,
+                CommandExecutionMode::PreviewOnly,
+            )
             .unwrap();
 
         assert_eq!(outcome.installed_skills.len(), 1);

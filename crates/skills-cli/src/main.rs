@@ -1,6 +1,6 @@
 use anyhow::{bail, Result};
 use clap::{Args, Parser, Subcommand};
-use skills_core::{InstallationOutcome, Skill, SkillsStore};
+use skills_core::{CommandExecutionMode, InstallationOutcome, Skill, SkillsStore};
 use std::io::{self, Write};
 use std::path::PathBuf;
 
@@ -172,24 +172,24 @@ fn group(store: &mut SkillsStore, command: GroupCommands) -> Result<()> {
 fn install(store: &SkillsStore, command: InstallCommands) -> Result<()> {
     match command {
         InstallCommands::Skill(args) => {
-            let execute = command_execution_confirmed(store, true, &args)?;
+            let command_mode = command_execution_mode(store, true, &args)?;
             let outcome = store.install_skill(
                 &args.reference,
                 args.project,
                 args.target,
                 args.overwrite,
-                execute,
+                command_mode,
             )?;
             print_install_outcome(outcome);
         }
         InstallCommands::Group(args) => {
-            let execute = command_execution_confirmed(store, false, &args)?;
+            let command_mode = command_execution_mode(store, false, &args)?;
             let outcome = store.install_group(
                 &args.reference,
                 args.project,
                 args.target,
                 args.overwrite,
-                execute,
+                command_mode,
             )?;
             print_install_outcome(outcome);
         }
@@ -197,11 +197,11 @@ fn install(store: &SkillsStore, command: InstallCommands) -> Result<()> {
     Ok(())
 }
 
-fn command_execution_confirmed(
+fn command_execution_mode(
     store: &SkillsStore,
     single_skill: bool,
     args: &InstallTargetArgs,
-) -> Result<bool> {
+) -> Result<CommandExecutionMode> {
     let previews = if single_skill {
         store.preview_skill_commands(&args.reference)?
     } else {
@@ -209,7 +209,7 @@ fn command_execution_confirmed(
     };
 
     if previews.is_empty() {
-        return Ok(false);
+        return Ok(CommandExecutionMode::PreviewOnly);
     }
 
     for command in &previews {
@@ -218,7 +218,7 @@ fn command_execution_confirmed(
     }
 
     if args.yes {
-        return Ok(true);
+        return Ok(CommandExecutionMode::InteractiveTerminal);
     }
 
     print!("Run these command skills now? [y/N] ");
@@ -226,7 +226,7 @@ fn command_execution_confirmed(
     let mut answer = String::new();
     io::stdin().read_line(&mut answer)?;
     if matches!(answer.trim().to_lowercase().as_str(), "y" | "yes") {
-        Ok(true)
+        Ok(CommandExecutionMode::InteractiveTerminal)
     } else {
         bail!("installation cancelled before running command skills")
     }

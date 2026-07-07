@@ -28,7 +28,7 @@ The same catalog is available through the desktop interface and the `skills-list
 - **Web preview mode** - Run the Vite UI outside Tauri with demo data while iterating on the frontend.
 
 > [!IMPORTANT]
-> Command skills can execute arbitrary shell commands. The app and CLI preview those commands before running them; use `--yes` only when you trust the catalog entry.
+> Command skills can execute arbitrary shell commands. The desktop app opens command skills in PowerShell so interactive prompts stay visible. The CLI previews commands before running them; use `--yes` only when you trust the catalog entry.
 
 ## Getting started
 
@@ -66,6 +66,20 @@ Open the local Vite URL in your browser. In this mode, the UI uses demo catalog 
 npm run build
 npm run tauri build
 ```
+
+The Windows `.exe` installer installs both the desktop app and the
+`skills-list` CLI. It adds the app install directory to the current user's
+`PATH`, so open a new terminal after installation before running
+`skills-list`.
+
+During development, you can also install the CLI directly:
+
+```bash
+npm run cli:install
+```
+
+This installs `skills-list.exe` into Cargo's bin directory, usually
+`%USERPROFILE%\.cargo\bin`.
 
 ### Test
 
@@ -119,6 +133,11 @@ cargo run -p skills-cli -- install skill tauri-v2 --project C:\path\to\project
 cargo run -p skills-cli -- install group starter --project C:\path\to\project --overwrite
 ```
 
+Command skills run in the current terminal when installed from the CLI. If the
+underlying command asks for input, answer it directly in PowerShell. The `--yes`
+flag only skips the skills-list confirmation; it does not answer prompts from
+the underlying command.
+
 Use a portable or test catalog:
 
 ```bash
@@ -149,7 +168,8 @@ If a field is missing, `skills-list` falls back to a sensible default: the folde
 
 ## Data layout
 
-The app and CLI store the catalog in the platform data directory by default:
+The app and CLI store the catalog in the same platform data directory by default
+using the app identifier `dev.skillslist.app`:
 
 ```text
 catalog.json
@@ -181,4 +201,3 @@ crates/
 src/              Vite/TypeScript frontend
 src-tauri/        Tauri shell and command bindings
 ```
-

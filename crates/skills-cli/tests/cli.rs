@@ -147,6 +147,63 @@ fn adds_and_executes_command_skill_with_yes() {
 }
 
 #[test]
+fn command_skill_can_read_stdin_with_yes() {
+    let temp = tempdir().unwrap();
+    let data_dir = temp.path().join("data");
+    let project = temp.path().join("project");
+    fs::create_dir_all(&project).unwrap();
+    let script = temp.path().join(if cfg!(windows) {
+        "interactive.cmd"
+    } else {
+        "interactive.sh"
+    });
+    if cfg!(windows) {
+        fs::write(
+            &script,
+            "@echo off\r\nset /p value=\r\necho interactive:%value%\r\n",
+        )
+        .unwrap();
+    } else {
+        fs::write(&script, "read value\necho interactive:$value\n").unwrap();
+    }
+    let command = if cfg!(windows) {
+        script.display().to_string()
+    } else {
+        format!("sh {}", script.display())
+    };
+
+    bin()
+        .args([
+            "--data-dir",
+            data_dir.to_str().unwrap(),
+            "add-command",
+            "Interactive Skill",
+            "--description",
+            "Reads stdin",
+            "--command",
+        ])
+        .arg(&command)
+        .assert()
+        .success();
+
+    bin()
+        .args([
+            "--data-dir",
+            data_dir.to_str().unwrap(),
+            "install",
+            "skill",
+            "interactive-skill",
+            "--project",
+            project.to_str().unwrap(),
+            "--yes",
+        ])
+        .write_stdin("hello\n")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("interactive:hello"));
+}
+
+#[test]
 fn refuses_overwrite_without_flag() {
     let temp = tempdir().unwrap();
     let data_dir = temp.path().join("data");

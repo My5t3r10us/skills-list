@@ -8,6 +8,7 @@ import {
   CircleAlert,
   CircleCheck,
   Command,
+  Copy,
   createIcons,
   Download,
   FolderOpen,
@@ -84,6 +85,7 @@ const iconSet = {
   CircleAlert,
   CircleCheck,
   Command,
+  Copy,
   Download,
   FolderOpen,
   FolderPlus,
@@ -146,6 +148,7 @@ const state = {
   actionsOpen: false,
   commandModalOpen: false,
   groupModalOpen: false,
+  pendingCommandActions: [] as InstallCommandPreview[],
   notice: "",
   error: "",
   loading: false,
@@ -291,6 +294,7 @@ function render() {
 
     ${state.commandModalOpen ? renderCommandModal() : ""}
     ${state.groupModalOpen ? renderGroupModal() : ""}
+    ${state.pendingCommandActions.length ? renderCommandActionsModal() : ""}
   `;
 
   bindEvents();
@@ -687,7 +691,7 @@ tags:
           <dt><code>group add &lt;group&gt; &lt;skill&gt;</code> / <code>group remove &lt;group&gt; &lt;skill&gt;</code></dt>
           <dd><code>&lt;group&gt;</code> et <code>&lt;skill&gt;</code> acceptent un id ou un nom exact, sans tenir compte de la casse.</dd>
           <dt><code>install skill|group &lt;reference&gt;</code></dt>
-          <dd><code>&lt;reference&gt;</code> est obligatoire. Ajoute <code>--project</code> pour choisir le projet, <code>--target</code> pour forcer le dossier final, <code>--overwrite</code> pour remplacer, et <code>--yes</code> pour executer les command skills sans confirmation.</dd>
+          <dd><code>&lt;reference&gt;</code> est obligatoire. Ajoute <code>--project</code> pour choisir le projet, <code>--target</code> pour forcer le dossier final, <code>--overwrite</code> pour remplacer, et <code>--yes</code> pour sauter la confirmation skills-list.</dd>
         </dl>
       </section>
 
@@ -698,6 +702,8 @@ tags:
           <dd>Change le dossier de donnees du catalogue pour cette commande.</dd>
           <dt><code>SKILLS_LIST_DATA_DIR</code></dt>
           <dd>Variable d'environnement equivalente a <code>--data-dir</code>.</dd>
+          <dt>Dossier par defaut</dt>
+          <dd>Sans option, le CLI utilise le meme catalogue que l'app desktop, sous l'identifiant <code>dev.skillslist.app</code>.</dd>
           <dt>References</dt>
           <dd>Les skills et groupes peuvent etre references par id, ou par nom exact sans tenir compte de la casse.</dd>
           <dt>Generation des ids</dt>
@@ -707,7 +713,7 @@ tags:
           <dt>Overwrite</dt>
           <dd>Si une cible existe deja, l'installation echoue sans <code>--overwrite</code>.</dd>
           <dt>Command skills</dt>
-          <dd>Le CLI affiche les commandes avant execution. <code>--yes</code> execute sans prompt interactif.</dd>
+          <dd>Le CLI execute les commandes dans le terminal courant. <code>--yes</code> saute la confirmation skills-list, mais les prompts de la commande restent interactifs. Depuis l'app desktop, ouvre PowerShell pour les commandes qui demandent une saisie.</dd>
         </dl>
       </section>
 
@@ -799,6 +805,42 @@ function renderGroupModal(): string {
   `;
 }
 
+function renderCommandActionsModal(): string {
+  return `
+    <div class="modal-backdrop">
+      <div class="modal command-modal">
+        <div class="modal-head">
+          <div>
+            <h2>Commandes a lancer</h2>
+            <p>Ces skills peuvent demander des saisies dans le terminal.</p>
+          </div>
+          <button class="icon-button" id="close-command-actions" type="button" title="Fermer"><i data-lucide="x"></i></button>
+        </div>
+        <div class="command-actions">
+          ${state.pendingCommandActions
+            .map(
+              (preview, index) => `
+                <article class="command-action">
+                  <strong>${escapeHtml(preview.skillName)}</strong>
+                  <pre><code>${escapeHtml(preview.command)}</code></pre>
+                  <div class="command-action-buttons">
+                    <button class="button primary" type="button" data-open-command="${index}">
+                      <i data-lucide="terminal"></i>Ouvrir PowerShell
+                    </button>
+                    <button class="button secondary" type="button" data-copy-command="${index}">
+                      <i data-lucide="copy"></i>Copier
+                    </button>
+                  </div>
+                </article>
+              `,
+            )
+            .join("")}
+        </div>
+      </div>
+    </div>
+  `;
+}
+
 function renderEmptyState(title: string, body: string): string {
   return `
     <div class="empty">
@@ -863,6 +905,11 @@ function bindEvents() {
 
   document.querySelector<HTMLButtonElement>("#close-group-modal")?.addEventListener("click", () => {
     state.groupModalOpen = false;
+    render();
+  });
+
+  document.querySelector<HTMLButtonElement>("#close-command-actions")?.addEventListener("click", () => {
+    state.pendingCommandActions = [];
     render();
   });
 
@@ -1115,6 +1162,54 @@ function bindEvents() {
     state.overwrite = form.get("overwrite") === "on";
     withTask(installCurrentSelection);
   });
+
+  document.querySelectorAll<HTMLButtonElement>("[data-copy-command]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const preview = state.pendingCommandActions[Number(button.dataset.copyCommand)];
+      if (!preview) return;
+      withTask(async () => {
+        await copyText(preview.command);
+        state.notice = `Commande copiee: ${preview.skillName}`;
+      });
+    });
+  });
+
+  document.querySelectorAll<HTMLButtonElement>("[data-open-command]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const preview = state.pendingCommandActions[Number(button.dataset.openCommand)];
+      if (!preview) return;
+      withTask(async () => {
+        await invoke("open_command_terminal", {
+          input: {
+            command: preview.command,
+            projectPath: state.installProject || null,
+          },
+        });
+        state.notice = `PowerShell ouvert pour ${preview.skillName}`;
+      });
+    });
+  });
+}
+
+async function copyText(value: string) {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(value);
+      return;
+    }
+  } catch {
+    // Fall through to the textarea fallback for stricter webview clipboard policies.
+  }
+
+  const textArea = document.createElement("textarea");
+  textArea.value = value;
+  textArea.style.position = "fixed";
+  textArea.style.opacity = "0";
+  document.body.appendChild(textArea);
+  textArea.focus();
+  textArea.select();
+  document.execCommand("copy");
+  textArea.remove();
 }
 
 async function installCurrentSelection() {
@@ -1126,34 +1221,21 @@ async function installCurrentSelection() {
   const reference = state.installReference;
   const projectPath = state.installProject || null;
   const targetPath = state.installTarget || null;
-  const previewCommand =
-    state.installMode === "skill" ? "preview_skill_commands" : "preview_group_commands";
   const installCommand = state.installMode === "skill" ? "install_skill" : "install_group";
   const refKey = state.installMode === "skill" ? "skillRef" : "groupRef";
-  const previews = await invoke<InstallCommandPreview[]>(previewCommand, {
-    [refKey]: reference,
-  });
-
-  let executeCommands = false;
-  if (previews.length) {
-    const commands = previews
-      .map((preview) => `${preview.skillName}\n${preview.command}`)
-      .join("\n\n");
-    executeCommands = confirm(`Executer ces commandes d'installation ?\n\n${commands}`);
-    if (!executeCommands) {
-      state.notice = "Installation annulee avant execution des commandes.";
-      return;
-    }
-  }
 
   const outcome = await invoke<InstallationOutcome>(installCommand, {
-    [refKey]: reference,
-    projectPath,
-    targetPath,
-    overwrite: state.overwrite,
-    executeCommands,
+    input: {
+      [refKey]: reference,
+      projectPath,
+      targetPath,
+      overwrite: state.overwrite,
+    },
   });
-  state.notice = `${outcome.installedSkills.length} element(s) installe(s) vers ${outcome.targetDir}`;
+  state.pendingCommandActions = outcome.commandPreviews;
+  state.notice = outcome.commandPreviews.length
+    ? `${outcome.installedSkills.length} element(s) installe(s). Commandes restantes a lancer dans PowerShell.`
+    : `${outcome.installedSkills.length} element(s) installe(s) vers ${outcome.targetDir}`;
 }
 
 refreshCatalog()

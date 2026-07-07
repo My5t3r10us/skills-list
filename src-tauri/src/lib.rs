@@ -1,8 +1,10 @@
 use serde::Deserialize;
 use skills_core::{
-    Catalog, InstallCommandPreview, InstallationOutcome, Skill, SkillGroup, SkillsStore,
+    Catalog, CommandExecutionMode, InstallCommandPreview, InstallationOutcome, Skill, SkillGroup,
+    SkillsStore,
 };
 use std::path::PathBuf;
+use std::process::Command;
 use tauri::{AppHandle, Manager};
 
 fn app_store(app: &AppHandle) -> Result<SkillsStore, String> {
@@ -20,6 +22,31 @@ struct CommandSkillInput {
     description: String,
     command: String,
     tags: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct InstallSkillInput {
+    skill_ref: String,
+    project_path: Option<String>,
+    target_path: Option<String>,
+    overwrite: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct InstallGroupInput {
+    group_ref: String,
+    project_path: Option<String>,
+    target_path: Option<String>,
+    overwrite: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OpenCommandTerminalInput {
+    command: String,
+    project_path: Option<String>,
 }
 
 #[tauri::command]
@@ -137,44 +164,52 @@ fn preview_group_commands(
 }
 
 #[tauri::command]
-fn install_skill(
-    app: AppHandle,
-    skill_ref: String,
-    project_path: Option<String>,
-    target_path: Option<String>,
-    overwrite: bool,
-    execute_commands: bool,
-) -> Result<InstallationOutcome, String> {
+fn install_skill(app: AppHandle, input: InstallSkillInput) -> Result<InstallationOutcome, String> {
     let store = app_store(&app)?;
     store
         .install_skill(
-            &skill_ref,
-            project_path.map(PathBuf::from),
-            target_path.map(PathBuf::from),
-            overwrite,
-            execute_commands,
+            &input.skill_ref,
+            input.project_path.map(PathBuf::from),
+            input.target_path.map(PathBuf::from),
+            input.overwrite,
+            CommandExecutionMode::PreviewOnly,
         )
         .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
-fn install_group(
-    app: AppHandle,
-    group_ref: String,
-    project_path: Option<String>,
-    target_path: Option<String>,
-    overwrite: bool,
-    execute_commands: bool,
-) -> Result<InstallationOutcome, String> {
+fn install_group(app: AppHandle, input: InstallGroupInput) -> Result<InstallationOutcome, String> {
     let store = app_store(&app)?;
     store
         .install_group(
-            &group_ref,
-            project_path.map(PathBuf::from),
-            target_path.map(PathBuf::from),
-            overwrite,
-            execute_commands,
+            &input.group_ref,
+            input.project_path.map(PathBuf::from),
+            input.target_path.map(PathBuf::from),
+            input.overwrite,
+            CommandExecutionMode::PreviewOnly,
         )
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn open_command_terminal(input: OpenCommandTerminalInput) -> Result<(), String> {
+    let mut process = if cfg!(windows) {
+        let mut command = Command::new("powershell.exe");
+        command.args(["-NoExit", "-Command", &input.command]);
+        command
+    } else {
+        let mut command = Command::new("sh");
+        command.args(["-c", &input.command]);
+        command
+    };
+
+    if let Some(project_path) = input.project_path.filter(|path| !path.trim().is_empty()) {
+        process.current_dir(project_path);
+    }
+
+    process
+        .spawn()
+        .map(|_| ())
         .map_err(|error| error.to_string())
 }
 
@@ -196,7 +231,8 @@ pub fn run() {
             preview_skill_commands,
             preview_group_commands,
             install_skill,
-            install_group
+            install_group,
+            open_command_terminal
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

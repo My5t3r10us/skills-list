@@ -5,3 +5,4 @@ target/
 .DS_Store
 *.log
 src-tauri/gen/
+src-tauri/binaries/

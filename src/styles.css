@@ -839,6 +839,50 @@ code {
   resize: vertical;
 }
 
+.command-modal {
+  width: min(720px, 100%);
+}
+
+.command-actions {
+  display: grid;
+  gap: 12px;
+}
+
+.command-action {
+  display: grid;
+  gap: 8px;
+  border: 1px solid #e2e5df;
+  border-radius: 8px;
+  background: #fafbf9;
+  padding: 12px;
+}
+
+.command-action strong {
+  color: #171a18;
+  font-size: 13px;
+  line-height: 18px;
+}
+
+.command-action pre {
+  overflow: auto;
+  max-height: 140px;
+  border-radius: 7px;
+  background: #f0f2ef;
+  padding: 10px;
+}
+
+.command-action pre code {
+  padding: 0;
+  background: transparent;
+  line-height: 18px;
+}
+
+.command-action-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 .empty {
   display: grid;
   gap: 6px;

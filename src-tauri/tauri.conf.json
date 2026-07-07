@@ -1,11 +1,12 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "skills-list",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "identifier": "dev.skillslist.app",
   "build": {
     "beforeDevCommand": "npm run dev",
     "beforeBuildCommand": "npm run build",
+    "beforeBundleCommand": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-cli-sidecar.ps1",
     "devUrl": "http://127.0.0.1:5174",
     "frontendDist": "../dist"
   },
@@ -27,6 +28,13 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all"
+    "targets": "all",
+    "icon": ["icons/icon.ico"],
+    "externalBin": ["binaries/skills-list"],
+    "windows": {
+      "nsis": {
+        "installerHooks": "installer-hooks.nsh"
+      }
+    }
   }
 }

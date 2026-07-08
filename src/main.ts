@@ -26,7 +26,7 @@ import {
 import "./styles.css";
 
 type SourceType = "local" | "command";
-type View = "skills" | "groups" | "install" | "docs";
+type View = "skills" | "groups" | "projects" | "install" | "docs";
 type InstallMode = "skill" | "group";
 type CommandMode = "manual" | "stdin" | "preview";
 type CommandInputStep =
@@ -54,10 +54,23 @@ type SkillGroup = {
   skillIds: string[];
 };
 
+type Project = {
+  id: string;
+  name: string;
+  path: string;
+};
+
 type Catalog = {
   schemaVersion: number;
   skills: Skill[];
   groups: SkillGroup[];
+  projects: Project[];
+};
+
+type ScannedSkill = {
+  path: string;
+  skill: Skill;
+  inCatalog: boolean;
 };
 
 type InstallCommandPreview = {
@@ -145,16 +158,27 @@ const demoCatalog: Catalog = {
       skillIds: ["demo/local-skill", "demo/command-skill"],
     },
   ],
+  projects: [
+    {
+      id: "demo/project",
+      name: "Demo project",
+      path: "C:/Code/demo-project",
+    },
+  ],
 };
 
 const state = {
-  catalog: { schemaVersion: 1, skills: [], groups: [] } as Catalog,
+  catalog: { schemaVersion: 1, skills: [], groups: [], projects: [] } as Catalog,
   view: "skills" as View,
   query: "",
   selectedSkillId: "",
   selectedGroupId: "",
+  selectedProjectId: "",
+  projectScanProjectId: "",
+  projectScanResults: [] as ScannedSkill[],
   installMode: "skill" as InstallMode,
   installReference: "",
+  installProjectId: "",
   installProject: "",
   installTarget: "",
   overwrite: false,
@@ -208,6 +232,15 @@ function commandStepLabel(step: CommandInputStep): string {
   return `Texte: ${step.value}`;
 }
 
+function normalizeCatalog(catalog: Catalog): Catalog {
+  return {
+    schemaVersion: catalog.schemaVersion,
+    skills: catalog.skills ?? [],
+    groups: catalog.groups ?? [],
+    projects: catalog.projects ?? [],
+  };
+}
+
 function resetCommandDraft(skill?: Skill) {
   state.editingCommandSkillId = skill?.id ?? "";
   state.commandDraftName = skill?.name ?? "";
@@ -231,6 +264,18 @@ function filteredSkills(): Skill[] {
   });
 }
 
+function filteredProjects(): Project[] {
+  const query = state.query.trim().toLowerCase();
+  if (!query) return state.catalog.projects;
+  return state.catalog.projects.filter((project) => {
+    return (
+      project.name.toLowerCase().includes(query) ||
+      project.id.toLowerCase().includes(query) ||
+      project.path.toLowerCase().includes(query)
+    );
+  });
+}
+
 function selectedSkill(): Skill | undefined {
   return state.catalog.skills.find((skill) => skill.id === state.selectedSkillId);
 }
@@ -239,15 +284,25 @@ function selectedGroup(): SkillGroup | undefined {
   return state.catalog.groups.find((group) => group.id === state.selectedGroupId);
 }
 
+function selectedProject(): Project | undefined {
+  return state.catalog.projects.find((project) => project.id === state.selectedProjectId);
+}
+
 function skillName(id: string): string {
   return state.catalog.skills.find((skill) => skill.id === id)?.name ?? id;
 }
 
+function isSkillInCatalog(skill: Skill): boolean {
+  return state.catalog.skills.some(
+    (item) => item.id === skill.id || item.name.toLowerCase() === skill.name.toLowerCase(),
+  );
+}
+
 async function refreshCatalog() {
   if (isTauriRuntime()) {
-    state.catalog = await invoke<Catalog>("get_catalog");
+    state.catalog = normalizeCatalog(await invoke<Catalog>("get_catalog"));
   } else {
-    state.catalog = demoCatalog;
+    state.catalog = normalizeCatalog(demoCatalog);
     if (!state.notice) {
       state.notice = "Apercu web: les actions systeme sont dans l'app Tauri.";
     }
@@ -258,6 +313,14 @@ async function refreshCatalog() {
   }
   if (!state.catalog.groups.some((group) => group.id === state.selectedGroupId)) {
     state.selectedGroupId = "";
+  }
+  if (!state.catalog.projects.some((project) => project.id === state.selectedProjectId)) {
+    state.selectedProjectId = "";
+    state.projectScanProjectId = "";
+    state.projectScanResults = [];
+  }
+  if (!state.catalog.projects.some((project) => project.id === state.installProjectId)) {
+    state.installProjectId = "";
   }
   if (!state.installReference) {
     state.installReference =
@@ -292,11 +355,97 @@ async function chooseDirectory(): Promise<string | null> {
   return typeof selected === "string" ? selected : null;
 }
 
+function projectNameFromPath(path: string): string {
+  const normalized = path.replace(/\\/g, "/").replace(/\/+$/, "");
+  return normalized.split("/").pop() || path || "Projet";
+}
+
+function demoProjectFromPath(path: string): Project {
+  const name = projectNameFromPath(path);
+  return {
+    id: `demo/${name.toLowerCase().replace(/\s+/g, "-")}`,
+    name,
+    path,
+  };
+}
+
+async function addProjectFromFolder() {
+  const path = await chooseDirectory();
+  if (!path) return;
+
+  if (!isTauriRuntime()) {
+    const existing = state.catalog.projects.find((project) => project.path === path);
+    const project = existing ?? demoProjectFromPath(path);
+    if (!existing) {
+      state.catalog.projects = [...state.catalog.projects, project];
+    }
+    state.view = "projects";
+    state.selectedProjectId = project.id;
+    state.notice = `Projet ajoute en apercu: ${project.name}`;
+    return;
+  }
+
+  const project = await invoke<Project>("add_project", { path });
+  await refreshCatalog();
+  state.view = "projects";
+  state.selectedProjectId = project.id;
+  state.notice = `Projet ajoute: ${project.name}`;
+}
+
+async function scanProjectSkills(projectId: string) {
+  const project = state.catalog.projects.find((item) => item.id === projectId);
+  if (!project) return;
+
+  if (!isTauriRuntime()) {
+    state.projectScanProjectId = project.id;
+    state.projectScanResults = [];
+    state.notice = "Scan disponible dans la fenetre Tauri.";
+    return;
+  }
+
+  const results = await invoke<ScannedSkill[]>("scan_project", { projectRef: project.id });
+  state.projectScanProjectId = project.id;
+  state.projectScanResults = results;
+  state.notice = `${results.length} skill(s) detecte(s) dans ${project.name}`;
+}
+
+async function importScannedSkill(index: number) {
+  const scanned = state.projectScanResults[index];
+  const projectId = state.projectScanProjectId;
+  if (!scanned || !projectId) return;
+
+  if (!isTauriRuntime()) {
+    const skill = {
+      ...scanned.skill,
+      id: `demo/${scanned.skill.id}`,
+      libraryPath: scanned.path,
+      sourceType: "local" as SourceType,
+    };
+    state.catalog.skills = [...state.catalog.skills, skill];
+    state.projectScanResults = state.projectScanResults.map((item, itemIndex) =>
+      itemIndex === index ? { ...item, inCatalog: true } : item,
+    );
+    state.notice = `Skill ajoute en apercu: ${skill.name}`;
+    return;
+  }
+
+  const imported = await invoke<Skill[]>("import_path", { path: scanned.path });
+  await refreshCatalog();
+  state.selectedProjectId = projectId;
+  await scanProjectSkills(projectId);
+  state.notice = `Skill ajoute: ${imported[0]?.name ?? scanned.skill.name}`;
+}
+
 function render() {
   const skills = filteredSkills();
   const skill = selectedSkill();
   const group = selectedGroup();
-  const panelOpen = (state.view === "skills" && skill) || (state.view === "groups" && group);
+  const projects = filteredProjects();
+  const project = selectedProject();
+  const panelOpen =
+    (state.view === "skills" && skill) ||
+    (state.view === "groups" && group) ||
+    (state.view === "projects" && project);
 
   app.innerHTML = `
     <div class="shell">
@@ -308,6 +457,7 @@ function render() {
         <nav class="nav">
           ${navButton("skills", "box", "Skills", String(state.catalog.skills.length))}
           ${navButton("groups", "users", "Groupes", String(state.catalog.groups.length))}
+          ${navButton("projects", "folder-open", "Projets", String(state.catalog.projects.length))}
           ${navButton("docs", "book-open", "Docs CLI")}
         </nav>
       </aside>
@@ -320,7 +470,7 @@ function render() {
           </div>
 
           <div class="topbar-controls">
-            ${state.view === "skills" || state.view === "groups" ? renderSearch() : ""}
+            ${state.view === "skills" || state.view === "groups" || state.view === "projects" ? renderSearch() : ""}
             <div class="actions-menu">
               <button class="button primary" id="actions-toggle" type="button">
                 Actions
@@ -336,6 +486,7 @@ function render() {
         <section class="content ${panelOpen ? "has-panel" : ""}">
           ${state.view === "skills" ? renderSkillsView(skills, skill) : ""}
           ${state.view === "groups" ? renderGroupsView(group) : ""}
+          ${state.view === "projects" ? renderProjectsView(projects, project) : ""}
           ${state.view === "install" ? renderInstallView() : ""}
           ${state.view === "docs" ? renderDocsView() : ""}
         </section>
@@ -354,6 +505,7 @@ function render() {
 function pageTitle(visibleSkills: number): string {
   if (state.view === "skills") return "Skills";
   if (state.view === "groups") return "Groupes";
+  if (state.view === "projects") return "Projets";
   if (state.view === "install") return "Installer";
   return "Docs CLI";
 }
@@ -361,6 +513,7 @@ function pageTitle(visibleSkills: number): string {
 function pageSubtitle(visibleSkills: number): string {
   if (state.view === "skills") return `${visibleSkills} visibles`;
   if (state.view === "groups") return `${state.catalog.groups.length} groupes`;
+  if (state.view === "projects") return `${filteredProjects().length} visibles`;
   if (state.view === "install") return "Installation";
   return "Reference exacte du binaire skills-list";
 }
@@ -395,6 +548,10 @@ function renderActionsDropdown(): string {
       <button type="button" id="open-group-modal">
         <i data-lucide="users"></i>
         Creer un groupe
+      </button>
+      <button type="button" id="add-project">
+        <i data-lucide="folder-plus"></i>
+        Ajouter un projet
       </button>
       <button type="button" id="import-skill">
         <i data-lucide="folder-plus"></i>
@@ -578,11 +735,100 @@ function renderGroupPanel(group: SkillGroup): string {
   `;
 }
 
+function renderProjectsView(projects: Project[], project?: Project): string {
+  return `
+    <div class="main-column">
+      <div class="list">
+        ${
+          projects.length
+            ? projects.map(renderProjectRow).join("")
+            : renderEmptyState("Aucun projet", "Aucun dossier projet enregistre.")
+        }
+      </div>
+    </div>
+    ${project ? `<aside class="panel project-panel">${renderProjectPanel(project)}</aside>` : ""}
+  `;
+}
+
+function renderProjectRow(project: Project): string {
+  const selected = project.id === state.selectedProjectId ? "selected" : "";
+  return `
+    <button class="row ${selected}" data-project="${escapeHtml(project.id)}">
+      <span class="row-icon"><i data-lucide="folder-open"></i></span>
+      <span class="row-main">
+        <strong>${escapeHtml(project.name)}</strong>
+        <small>${escapeHtml(project.path)}</small>
+      </span>
+      <span class="row-kind">projet</span>
+    </button>
+  `;
+}
+
+function renderProjectPanel(project: Project): string {
+  const hasScan = state.projectScanProjectId === project.id;
+  return `
+    <div class="panel-head">
+      <div>
+        <h2>${escapeHtml(project.name)}</h2>
+        <p>${escapeHtml(project.id)}</p>
+      </div>
+      <button class="icon-button" id="close-panel" type="button" title="Fermer">
+        <i data-lucide="x"></i>
+      </button>
+    </div>
+    <dl class="details">
+      <dt>Dossier</dt>
+      <dd><code>${escapeHtml(project.path)}</code></dd>
+      <dt>Scan</dt>
+      <dd>${hasScan ? `${state.projectScanResults.length} skill(s)` : "Non lance"}</dd>
+    </dl>
+    <div class="panel-actions">
+      <button class="button primary" id="scan-project"><i data-lucide="refresh-cw"></i>Scanner</button>
+      <button class="button secondary" id="install-to-project"><i data-lucide="package-plus"></i>Utiliser pour installer</button>
+      <button class="button danger" id="delete-project"><i data-lucide="trash-2"></i>Supprimer</button>
+    </div>
+    <div class="scan-section">
+      <h3>Skills detectes</h3>
+      <div class="scan-list">
+        ${
+          hasScan
+            ? state.projectScanResults.length
+              ? state.projectScanResults.map(renderScannedSkillRow).join("")
+              : renderEmptyState("Aucun skill detecte", "Aucun dossier SKILL.md dans ce projet.")
+            : renderEmptyState("Scan non lance", "Aucun resultat charge.")
+        }
+      </div>
+    </div>
+  `;
+}
+
+function renderScannedSkillRow(scanned: ScannedSkill, index: number): string {
+  const alreadyInCatalog = scanned.inCatalog || isSkillInCatalog(scanned.skill);
+  return `
+    <div class="scan-row">
+      <span class="row-icon"><i data-lucide="box"></i></span>
+      <span class="row-main">
+        <strong>${escapeHtml(scanned.skill.name)}</strong>
+        <small>${escapeHtml(scanned.path)}</small>
+      </span>
+      <button class="button ${alreadyInCatalog ? "secondary" : "primary"}" type="button" data-import-scan="${index}" ${alreadyInCatalog ? "disabled" : ""}>
+        <i data-lucide="${alreadyInCatalog ? "check" : "plus"}"></i>${alreadyInCatalog ? "Dans la liste" : "Ajouter"}
+      </button>
+    </div>
+  `;
+}
+
 function renderInstallView(): string {
   const references =
     state.installMode === "skill" ? state.catalog.skills : state.catalog.groups;
   if (!references.some((item) => item.id === state.installReference)) {
     state.installReference = references[0]?.id ?? "";
+  }
+  const selectedInstallProject = state.catalog.projects.find(
+    (project) => project.id === state.installProjectId,
+  );
+  if (selectedInstallProject && state.installProject !== selectedInstallProject.path) {
+    state.installProject = selectedInstallProject.path;
   }
 
   return `
@@ -603,8 +849,24 @@ function renderInstallView(): string {
               .join("")}
           </select>
         </label>
+        ${
+          state.catalog.projects.length
+            ? `<label>
+                Projet enregistre
+                <select name="projectId" id="install-project-select">
+                  <option value="">Chemin personnalise</option>
+                  ${state.catalog.projects
+                    .map(
+                      (project) =>
+                        `<option value="${escapeHtml(project.id)}" ${project.id === state.installProjectId ? "selected" : ""}>${escapeHtml(project.name)}</option>`,
+                    )
+                    .join("")}
+                </select>
+              </label>`
+            : ""
+        }
         <label>
-          Projet
+          Dossier du projet
           <div class="path-row">
             <input name="project" value="${escapeHtml(state.installProject)}" placeholder="Dossier du projet" />
             <button class="icon-button" type="button" id="choose-project" title="Choisir"><i data-lucide="folder-open"></i></button>
@@ -986,6 +1248,7 @@ function bindEvents() {
       state.view = button.dataset.view as View;
       state.selectedSkillId = "";
       state.selectedGroupId = "";
+      state.selectedProjectId = "";
       state.actionsOpen = false;
       render();
     });
@@ -1021,6 +1284,11 @@ function bindEvents() {
     render();
   });
 
+  document.querySelector<HTMLButtonElement>("#add-project")?.addEventListener("click", () => {
+    state.actionsOpen = false;
+    withTask(addProjectFromFolder);
+  });
+
   document.querySelector<HTMLButtonElement>("#close-command-modal")?.addEventListener("click", () => {
     state.commandModalOpen = false;
     resetCommandDraft();
@@ -1044,6 +1312,7 @@ function bindEvents() {
     state.groupModalOpen = false;
     state.selectedSkillId = "";
     state.selectedGroupId = "";
+    state.selectedProjectId = "";
     state.installMode = "skill";
     state.installReference = state.catalog.skills[0]?.id || "";
     render();
@@ -1065,6 +1334,7 @@ function bindEvents() {
     button.addEventListener("click", () => {
       state.selectedSkillId = button.dataset.skill ?? "";
       state.selectedGroupId = "";
+      state.selectedProjectId = "";
       state.actionsOpen = false;
       render();
     });
@@ -1074,6 +1344,17 @@ function bindEvents() {
     button.addEventListener("click", () => {
       state.selectedGroupId = button.dataset.group ?? "";
       state.selectedSkillId = "";
+      state.selectedProjectId = "";
+      state.actionsOpen = false;
+      render();
+    });
+  });
+
+  document.querySelectorAll<HTMLButtonElement>("[data-project]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.selectedProjectId = button.dataset.project ?? "";
+      state.selectedSkillId = "";
+      state.selectedGroupId = "";
       state.actionsOpen = false;
       render();
     });
@@ -1082,6 +1363,7 @@ function bindEvents() {
   document.querySelector<HTMLButtonElement>("#close-panel")?.addEventListener("click", () => {
     state.selectedSkillId = "";
     state.selectedGroupId = "";
+    state.selectedProjectId = "";
     state.actionsOpen = false;
     render();
   });
@@ -1292,6 +1574,55 @@ function bindEvents() {
     });
   });
 
+  document.querySelector<HTMLButtonElement>("#scan-project")?.addEventListener("click", () => {
+    const project = selectedProject();
+    if (!project) return;
+    withTask(async () => {
+      await scanProjectSkills(project.id);
+    });
+  });
+
+  document.querySelector<HTMLButtonElement>("#install-to-project")?.addEventListener("click", () => {
+    const project = selectedProject();
+    if (!project) return;
+    state.view = "install";
+    state.installProjectId = project.id;
+    state.installProject = project.path;
+    state.selectedProjectId = "";
+    render();
+  });
+
+  document.querySelector<HTMLButtonElement>("#delete-project")?.addEventListener("click", () => {
+    const project = selectedProject();
+    if (!project) return;
+    if (!confirm(`Supprimer le projet ${project.name} ?`)) return;
+    withTask(async () => {
+      if (!isTauriRuntime()) {
+        state.catalog.projects = state.catalog.projects.filter((item) => item.id !== project.id);
+        state.selectedProjectId = "";
+        state.projectScanProjectId = "";
+        state.projectScanResults = [];
+        state.notice = `Projet supprime en apercu: ${project.name}`;
+        return;
+      }
+      await invoke<Project>("delete_project", { projectRef: project.id });
+      state.selectedProjectId = "";
+      state.projectScanProjectId = "";
+      state.projectScanResults = [];
+      await refreshCatalog();
+      state.notice = `Projet supprime: ${project.name}`;
+    });
+  });
+
+  document.querySelectorAll<HTMLButtonElement>("[data-import-scan]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const index = Number(button.dataset.importScan);
+      withTask(async () => {
+        await importScannedSkill(index);
+      });
+    });
+  });
+
   document.querySelectorAll<HTMLButtonElement>("[data-install-mode]").forEach((button) => {
     button.addEventListener("click", () => {
       state.installMode = button.dataset.installMode as InstallMode;
@@ -1303,10 +1634,22 @@ function bindEvents() {
     });
   });
 
+  document.querySelector<HTMLSelectElement>("#install-project-select")?.addEventListener("change", (event) => {
+    const projectId = (event.target as HTMLSelectElement).value;
+    const project = state.catalog.projects.find((item) => item.id === projectId);
+    state.installProjectId = project?.id ?? "";
+    state.installProject = project?.path ?? "";
+    render();
+  });
+
   document.querySelector<HTMLButtonElement>("#choose-project")?.addEventListener("click", () => {
     withTask(async () => {
       const path = await chooseDirectory();
-      if (path) state.installProject = path;
+      if (path) {
+        state.installProject = path;
+        state.installProjectId =
+          state.catalog.projects.find((project) => project.path === path)?.id ?? "";
+      }
     });
   });
 
@@ -1321,7 +1664,9 @@ function bindEvents() {
     event.preventDefault();
     const form = new FormData(event.currentTarget as HTMLFormElement);
     state.installReference = String(form.get("reference") ?? "");
-    state.installProject = String(form.get("project") ?? "");
+    state.installProjectId = String(form.get("projectId") ?? "");
+    const project = state.catalog.projects.find((item) => item.id === state.installProjectId);
+    state.installProject = project?.path ?? String(form.get("project") ?? "");
     state.installTarget = String(form.get("target") ?? "");
     state.overwrite = form.get("overwrite") === "on";
     withTask(installCurrentSelection);

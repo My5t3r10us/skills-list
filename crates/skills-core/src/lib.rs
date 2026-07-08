@@ -27,8 +27,12 @@ pub enum SkillsError {
     NotCommandSkill(String),
     #[error("group not found: {0}")]
     GroupNotFound(String),
+    #[error("project not found: {0}")]
+    ProjectNotFound(String),
     #[error("invalid skill folder: {0}")]
     InvalidSkillFolder(String),
+    #[error("invalid project folder: {0}")]
+    InvalidProjectFolder(String),
     #[error("target already exists: {0}")]
     TargetExists(String),
     #[error("install command failed: {0}")]
@@ -91,10 +95,20 @@ pub struct SkillGroup {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+pub struct Project {
+    pub id: String,
+    pub name: String,
+    pub path: PathBuf,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct Catalog {
     pub schema_version: u32,
     pub skills: Vec<Skill>,
     pub groups: Vec<SkillGroup>,
+    #[serde(default)]
+    pub projects: Vec<Project>,
 }
 
 impl Default for Catalog {
@@ -103,8 +117,17 @@ impl Default for Catalog {
             schema_version: SCHEMA_VERSION,
             skills: Vec::new(),
             groups: Vec::new(),
+            projects: Vec::new(),
         }
     }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ScannedSkill {
+    pub path: PathBuf,
+    pub skill: Skill,
+    pub in_catalog: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -353,6 +376,78 @@ impl SkillsStore {
         }
         copy_dir_all(source, &destination)?;
         Ok(destination)
+    }
+
+    pub fn add_project(&mut self, path: impl AsRef<Path>) -> Result<Project> {
+        let path = path.as_ref();
+        if !path.is_dir() {
+            return Err(SkillsError::InvalidProjectFolder(
+                path.display().to_string(),
+            ));
+        }
+
+        let path = path.canonicalize()?;
+        if let Some(existing) = self
+            .catalog
+            .projects
+            .iter()
+            .find(|project| same_path(&project.path, &path))
+            .cloned()
+        {
+            return Ok(existing);
+        }
+
+        let name = project_name_from_path(&path);
+        let project = Project {
+            id: self.unique_project_id(&slugify(&name)),
+            name,
+            path,
+        };
+        self.catalog.projects.push(project.clone());
+        self.save()?;
+        Ok(project)
+    }
+
+    pub fn delete_project(&mut self, project_ref: &str) -> Result<Project> {
+        let index = self
+            .catalog
+            .projects
+            .iter()
+            .position(|project| matches_project(project, project_ref))
+            .ok_or_else(|| SkillsError::ProjectNotFound(project_ref.to_string()))?;
+        let project = self.catalog.projects.remove(index);
+        self.save()?;
+        Ok(project)
+    }
+
+    pub fn scan_project(&self, project_ref: &str) -> Result<Vec<ScannedSkill>> {
+        let project = self.find_project(project_ref)?;
+        self.scan_path(&project.path)
+    }
+
+    pub fn scan_path(&self, path: impl AsRef<Path>) -> Result<Vec<ScannedSkill>> {
+        let path = path.as_ref();
+        if !path.is_dir() {
+            return Err(SkillsError::InvalidProjectFolder(
+                path.display().to_string(),
+            ));
+        }
+
+        let folders = discover_skill_folders(path)?;
+        folders
+            .into_iter()
+            .map(|folder| {
+                let skill = parse_skill_folder(&folder)?;
+                let in_catalog = self.catalog.skills.iter().any(|existing| {
+                    existing.id == skill.id || existing.name.eq_ignore_ascii_case(&skill.name)
+                });
+                Ok(ScannedSkill {
+                    path: folder,
+                    skill,
+                    in_catalog,
+                })
+            })
+            .collect()
     }
 
     pub fn create_group(
@@ -606,6 +701,14 @@ impl SkillsStore {
             .ok_or_else(|| SkillsError::GroupNotFound(group_ref.to_string()))
     }
 
+    fn find_project(&self, project_ref: &str) -> Result<&Project> {
+        self.catalog
+            .projects
+            .iter()
+            .find(|project| matches_project(project, project_ref))
+            .ok_or_else(|| SkillsError::ProjectNotFound(project_ref.to_string()))
+    }
+
     fn unique_skill_id(&self, base: &str) -> String {
         unique_id(
             base,
@@ -617,6 +720,16 @@ impl SkillsStore {
         unique_id(
             base,
             self.catalog.groups.iter().map(|group| group.id.as_str()),
+        )
+    }
+
+    fn unique_project_id(&self, base: &str) -> String {
+        unique_id(
+            base,
+            self.catalog
+                .projects
+                .iter()
+                .map(|project| project.id.as_str()),
         )
     }
 }
@@ -865,6 +978,31 @@ fn matches_group(group: &SkillGroup, group_ref: &str) -> bool {
     group.id == group_ref || group.name.eq_ignore_ascii_case(group_ref)
 }
 
+fn matches_project(project: &Project, project_ref: &str) -> bool {
+    project.id == project_ref
+        || project.name.eq_ignore_ascii_case(project_ref)
+        || project
+            .path
+            .to_string_lossy()
+            .eq_ignore_ascii_case(project_ref)
+}
+
+fn same_path(left: &Path, right: &Path) -> bool {
+    if cfg!(windows) {
+        left.to_string_lossy()
+            .eq_ignore_ascii_case(right.to_string_lossy().as_ref())
+    } else {
+        left == right
+    }
+}
+
+fn project_name_from_path(path: &Path) -> String {
+    path.file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or_else(|| path.display().to_string())
+}
+
 fn command_preview_for_skill(skill: &Skill) -> Option<InstallCommandPreview> {
     if skill.source_type != SourceType::Command {
         return None;
@@ -951,6 +1089,7 @@ mod tests {
 
         assert_eq!(skill.command_mode, CommandMode::Manual);
         assert!(skill.command_input_steps.is_empty());
+        assert!(catalog.projects.is_empty());
     }
 
     #[test]
@@ -978,6 +1117,28 @@ mod tests {
         let library_path = imported[0].library_path.as_ref().unwrap();
         assert!(library_path.starts_with(data_dir.join("library").join("skills")));
         assert!(library_path.join(SKILL_FILE_NAME).exists());
+    }
+
+    #[test]
+    fn adds_project_and_scans_skills() {
+        let temp = tempdir().unwrap();
+        let data_dir = temp.path().join("data");
+        let project = temp.path().join("project");
+        let skill_dir = project.join(".agents").join("skills").join("Scan Me");
+        write_skill(&skill_dir, "Scan Me");
+
+        let mut store = SkillsStore::open(&data_dir).unwrap();
+        let project = store.add_project(&project).unwrap();
+        let scanned = store.scan_project(&project.id).unwrap();
+
+        assert_eq!(scanned.len(), 1);
+        assert_eq!(scanned[0].skill.name, "Scan Me");
+        assert!(!scanned[0].in_catalog);
+
+        store.import_path(&scanned[0].path).unwrap();
+        let scanned = store.scan_project(&project.id).unwrap();
+
+        assert!(scanned[0].in_catalog);
     }
 
     #[test]

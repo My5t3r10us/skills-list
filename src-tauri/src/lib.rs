@@ -1,7 +1,7 @@
 use serde::Deserialize;
 use skills_core::{
     Catalog, CommandExecutionMode, CommandInputStep, CommandMode, InstallCommandPreview,
-    InstallationOutcome, Skill, SkillGroup, SkillsStore,
+    InstallationOutcome, Project, ScannedSkill, Skill, SkillGroup, SkillsStore,
 };
 use std::path::PathBuf;
 use std::process::Command;
@@ -125,6 +125,28 @@ fn export_skill(
     store
         .export_skill(&skill_ref, output_dir, overwrite)
         .map(|path| path.display().to_string())
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn add_project(app: AppHandle, path: String) -> Result<Project, String> {
+    let mut store = app_store(&app)?;
+    store.add_project(path).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn delete_project(app: AppHandle, project_ref: String) -> Result<Project, String> {
+    let mut store = app_store(&app)?;
+    store
+        .delete_project(&project_ref)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn scan_project(app: AppHandle, project_ref: String) -> Result<Vec<ScannedSkill>, String> {
+    let store = app_store(&app)?;
+    store
+        .scan_project(&project_ref)
         .map_err(|error| error.to_string())
 }
 
@@ -256,6 +278,9 @@ pub fn run() {
             update_command_skill,
             delete_skill,
             export_skill,
+            add_project,
+            delete_project,
+            scan_project,
             create_group,
             group_add_skill,
             group_remove_skill,

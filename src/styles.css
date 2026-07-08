@@ -591,6 +591,45 @@ code {
   height: 16px;
 }
 
+.project-panel {
+  overflow-y: auto;
+}
+
+.scan-section {
+  display: grid;
+  gap: 10px;
+  margin-top: 18px;
+}
+
+.scan-section h3 {
+  color: #171a18;
+  font-size: 13px;
+  font-weight: 760;
+  line-height: 18px;
+}
+
+.scan-list {
+  display: grid;
+  gap: 8px;
+}
+
+.scan-row {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  min-height: 62px;
+  border: 1px solid #e2e5df;
+  border-radius: 7px;
+  background: #ffffff;
+  padding: 10px;
+}
+
+.scan-row .button {
+  min-width: 94px;
+  white-space: nowrap;
+}
+
 .compact-form {
   display: grid;
   grid-template-columns: minmax(160px, 220px) minmax(180px, 1fr) auto;
@@ -1035,5 +1074,14 @@ code {
   .row-kind {
     grid-column: 2;
     width: max-content;
+  }
+
+  .scan-row {
+    grid-template-columns: 30px minmax(0, 1fr);
+  }
+
+  .scan-row .button {
+    grid-column: 2;
+    justify-self: start;
   }
 }

@@ -28,6 +28,11 @@ import "./styles.css";
 type SourceType = "local" | "command";
 type View = "skills" | "groups" | "install" | "docs";
 type InstallMode = "skill" | "group";
+type CommandMode = "manual" | "stdin" | "preview";
+type CommandInputStep =
+  | { type: "enter" }
+  | { type: "text"; value: string }
+  | { type: "delayMs"; value: number };
 
 type Skill = {
   id: string;
@@ -37,6 +42,8 @@ type Skill = {
   sourceType: SourceType;
   libraryPath?: string | null;
   installCommand?: string | null;
+  commandMode?: CommandMode | null;
+  commandInputSteps?: CommandInputStep[] | null;
   tags: string[];
 };
 
@@ -57,6 +64,8 @@ type InstallCommandPreview = {
   skillId: string;
   skillName: string;
   command: string;
+  commandMode: CommandMode;
+  commandInputSteps: CommandInputStep[];
 };
 
 type InstallationOutcome = {
@@ -111,6 +120,8 @@ const demoCatalog: Catalog = {
       sourceType: "local",
       libraryPath: "C:/path/to/skill",
       installCommand: null,
+      commandMode: "manual",
+      commandInputSteps: [],
       tags: ["local", "codex", "workflow"],
     },
     {
@@ -121,6 +132,8 @@ const demoCatalog: Catalog = {
       sourceType: "command",
       libraryPath: null,
       installCommand: "codex skill install example",
+      commandMode: "manual",
+      commandInputSteps: [],
       tags: ["cli", "install"],
     },
   ],
@@ -147,6 +160,13 @@ const state = {
   overwrite: false,
   actionsOpen: false,
   commandModalOpen: false,
+  editingCommandSkillId: "",
+  commandDraftName: "",
+  commandDraftDescription: "",
+  commandDraftCommand: "",
+  commandDraftTags: "",
+  commandDraftMode: "manual" as CommandMode,
+  commandDraftSteps: [] as CommandInputStep[],
   groupModalOpen: false,
   pendingCommandActions: [] as InstallCommandPreview[],
   notice: "",
@@ -166,6 +186,36 @@ function escapeHtml(value: unknown): string {
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#039;");
+}
+
+function commandModeOf(skill?: Skill): CommandMode {
+  return skill?.commandMode ?? "manual";
+}
+
+function commandInputStepsOf(skill?: Skill): CommandInputStep[] {
+  return skill?.commandInputSteps ?? [];
+}
+
+function commandModeLabel(mode: CommandMode): string {
+  if (mode === "stdin") return "stdin";
+  if (mode === "preview") return "preview";
+  return "manual";
+}
+
+function commandStepLabel(step: CommandInputStep): string {
+  if (step.type === "enter") return "Enter";
+  if (step.type === "delayMs") return `Delai ${step.value} ms`;
+  return `Texte: ${step.value}`;
+}
+
+function resetCommandDraft(skill?: Skill) {
+  state.editingCommandSkillId = skill?.id ?? "";
+  state.commandDraftName = skill?.name ?? "";
+  state.commandDraftDescription = skill?.description ?? "";
+  state.commandDraftCommand = skill?.installCommand ?? "";
+  state.commandDraftTags = skill?.tags.join(", ") ?? "";
+  state.commandDraftMode = commandModeOf(skill);
+  state.commandDraftSteps = [...commandInputStepsOf(skill)];
 }
 
 function filteredSkills(): Skill[] {
@@ -415,6 +465,9 @@ function renderSkillRow(skill: Skill): string {
 }
 
 function renderSkillPanel(skill: Skill): string {
+  const isCommand = skill.sourceType === "command";
+  const commandMode = commandModeOf(skill);
+  const commandSteps = commandInputStepsOf(skill);
   return `
     <div class="panel-head">
       <div>
@@ -435,13 +488,23 @@ function renderSkillPanel(skill: Skill): string {
       <dd>${skill.tags.length ? skill.tags.map((tag) => `<span class="tag">${escapeHtml(tag)}</span>`).join("") : "Aucun"}</dd>
       ${
         skill.installCommand
-          ? `<dt>Commande</dt><dd><code>${escapeHtml(skill.installCommand)}</code></dd>`
+          ? `<dt>Commande</dt><dd><code>${escapeHtml(skill.installCommand)}</code></dd>
+             <dt>Mode</dt><dd><span class="tag">${escapeHtml(commandModeLabel(commandMode))}</span></dd>
+             ${
+               commandSteps.length
+                 ? `<dt>Steps</dt><dd>${commandSteps.map((step) => `<span class="tag">${escapeHtml(commandStepLabel(step))}</span>`).join("")}</dd>`
+                 : ""
+             }`
           : `<dt>Dossier</dt><dd><code>${escapeHtml(skill.libraryPath || "Bibliotheque locale")}</code></dd>`
       }
     </dl>
     <div class="panel-actions">
       <button class="button primary" id="install-selected"><i data-lucide="package-plus"></i>Installer</button>
-      <button class="button secondary" id="export-selected" ${skill.sourceType === "command" ? "disabled" : ""}><i data-lucide="download"></i>Exporter</button>
+      ${
+        isCommand
+          ? `<button class="button secondary" id="edit-command-selected"><i data-lucide="command"></i>Modifier la commande</button>`
+          : `<button class="button secondary" id="export-selected"><i data-lucide="download"></i>Exporter</button>`
+      }
       <button class="button danger" id="delete-selected"><i data-lucide="trash-2"></i>Supprimer</button>
     </div>
   `;
@@ -592,10 +655,19 @@ function renderDocsView(): string {
         ${docCommand(
           "add-command",
           "Ajoute un skill qui execute une commande au lieu de copier un dossier local.",
-          "skills-list add-command <name> --description <text> --command <cmd> [--tag <tag> ...]",
+          "skills-list add-command <name> --description <text> --command <cmd> [--mode manual|stdin|preview] [--input <step>] [--tag <tag> ...]",
           [
             'cargo run -p skills-cli -- add-command "Team Bootstrap" --description "Install shared skills" --command "codex skill install team-bootstrap"',
-            'cargo run -p skills-cli -- add-command "Echo Skill" --description "Runs echo" --command "echo ok" --tag cli --tag test',
+            'cargo run -p skills-cli -- add-command "Echo Skill" --description "Runs echo" --command "echo ok" --mode stdin --input enter --tag cli',
+          ],
+        )}
+        ${docCommand(
+          "update-command",
+          "Modifie le mode et les steps stdin d'un skill commande existant.",
+          "skills-list update-command <skill> [--mode manual|stdin|preview] [--clear-inputs] [--input <step> ...]",
+          [
+            "skills-list update-command create-readme --mode stdin --clear-inputs --input enter --input enter --input enter",
+            'skills-list update-command setup --mode stdin --input text:yes --input enter --input delay:500',
           ],
         )}
         ${docCommand(
@@ -685,7 +757,9 @@ tags:
           <dt><code>import &lt;path&gt;</code></dt>
           <dd><code>&lt;path&gt;</code> doit pointer vers un dossier avec un <code>SKILL.md</code>, ou vers un dossier parent contenant plusieurs sous-dossiers de skills.</dd>
           <dt><code>add-command &lt;name&gt; --description &lt;text&gt; --command &lt;cmd&gt;</code></dt>
-          <dd><code>--description</code> et <code>--command</code> sont obligatoires. Les tags sont optionnels avec <code>--tag &lt;tag&gt;</code> repete autant de fois que necessaire.</dd>
+          <dd><code>--description</code> et <code>--command</code> sont obligatoires. <code>--mode</code> vaut <code>manual</code> par defaut. <code>--input</code> accepte <code>enter</code>, <code>text:&lt;value&gt;</code>, <code>delay:&lt;ms&gt;</code>.</dd>
+          <dt><code>update-command &lt;skill&gt; [--mode ...] [--clear-inputs] [--input ...]</code></dt>
+          <dd>Met a jour un command skill existant. Si des <code>--input</code> sont fournis, ils remplacent la liste de steps.</dd>
           <dt><code>group create &lt;name&gt; [--description &lt;text&gt;]</code></dt>
           <dd><code>&lt;name&gt;</code> est obligatoire. L'id du groupe est genere depuis ce nom.</dd>
           <dt><code>group add &lt;group&gt; &lt;skill&gt;</code> / <code>group remove &lt;group&gt; &lt;skill&gt;</code></dt>
@@ -713,7 +787,7 @@ tags:
           <dt>Overwrite</dt>
           <dd>Si une cible existe deja, l'installation echoue sans <code>--overwrite</code>.</dd>
           <dt>Command skills</dt>
-          <dd>Le CLI execute les commandes dans le terminal courant. <code>--yes</code> saute la confirmation skills-list, mais les prompts de la commande restent interactifs. Depuis l'app desktop, ouvre PowerShell pour les commandes qui demandent une saisie.</dd>
+          <dd><code>manual</code> utilise le terminal interactif, <code>stdin</code> envoie les steps automatiquement, <code>preview</code> affiche/copier seulement.</dd>
         </dl>
       </section>
 
@@ -748,34 +822,78 @@ function docCommand(title: string, description: string, usage: string, examples:
 }
 
 function renderCommandModal(): string {
+  const editing = Boolean(state.editingCommandSkillId);
+  const mode = state.commandDraftMode;
   return `
     <div class="modal-backdrop">
-      <form class="modal" id="add-command-form">
+      <form class="modal command-editor-modal" id="add-command-form">
         <div class="modal-head">
           <div>
-            <h2>Ajouter une commande</h2>
-            <p>Reference un installateur externe.</p>
+            <h2>${editing ? "Modifier la commande" : "Ajouter une commande"}</h2>
+            <p>${editing ? escapeHtml(state.editingCommandSkillId) : "Reference un installateur externe."}</p>
           </div>
           <button class="icon-button" id="close-command-modal" type="button" title="Fermer"><i data-lucide="x"></i></button>
         </div>
         <label>
           Nom
-          <input name="name" required placeholder="Nom du skill" />
+          <input name="name" required placeholder="Nom du skill" value="${escapeHtml(state.commandDraftName)}" ${editing ? "disabled" : ""} />
         </label>
         <label>
           Description
-          <input name="description" required placeholder="Description courte" />
+          <input name="description" required placeholder="Description courte" value="${escapeHtml(state.commandDraftDescription)}" ${editing ? "disabled" : ""} />
         </label>
         <label>
           Commande
-          <textarea name="command" required placeholder="codex skill install ..."></textarea>
+          <textarea name="command" required placeholder="codex skill install ..." ${editing ? "disabled" : ""}>${escapeHtml(state.commandDraftCommand)}</textarea>
         </label>
         <label>
-          Tags
-          <input name="tags" placeholder="dev, cli, agent" />
+          Mode
+          <select name="commandMode" id="command-mode">
+            <option value="manual" ${mode === "manual" ? "selected" : ""}>manual</option>
+            <option value="stdin" ${mode === "stdin" ? "selected" : ""}>stdin</option>
+            <option value="preview" ${mode === "preview" ? "selected" : ""}>preview</option>
+          </select>
         </label>
-        <button class="button primary" type="submit"><i data-lucide="terminal"></i>Ajouter</button>
+        ${mode === "stdin" ? renderCommandStepsEditor() : ""}
+        <label>
+          Tags
+          <input name="tags" placeholder="dev, cli, agent" value="${escapeHtml(state.commandDraftTags)}" ${editing ? "disabled" : ""} />
+        </label>
+        <button class="button primary" type="submit"><i data-lucide="terminal"></i>${editing ? "Enregistrer" : "Ajouter"}</button>
       </form>
+    </div>
+  `;
+}
+
+function renderCommandStepsEditor(): string {
+  return `
+    <div class="steps-editor">
+      <div class="steps-header">
+        <strong>Steps stdin</strong>
+        <div class="step-buttons">
+          <button class="button secondary" type="button" id="add-step-enter">+ Enter</button>
+          <button class="button secondary" type="button" id="add-step-text">+ Texte</button>
+          <button class="button secondary" type="button" id="add-step-delay">+ Delai</button>
+        </div>
+      </div>
+      <div class="step-list">
+        ${
+          state.commandDraftSteps.length
+            ? state.commandDraftSteps
+                .map(
+                  (step, index) => `
+                    <div class="step-row">
+                      <span>${escapeHtml(commandStepLabel(step))}</span>
+                      <button class="icon-button" type="button" data-remove-step="${index}" title="Supprimer">
+                        <i data-lucide="x"></i>
+                      </button>
+                    </div>
+                  `,
+                )
+                .join("")
+            : `<div class="step-empty">Aucun step</div>`
+        }
+      </div>
     </div>
   `;
 }
@@ -821,12 +939,16 @@ function renderCommandActionsModal(): string {
             .map(
               (preview, index) => `
                 <article class="command-action">
-                  <strong>${escapeHtml(preview.skillName)}</strong>
+                  <strong>${escapeHtml(preview.skillName)} <span class="tag">${escapeHtml(commandModeLabel(preview.commandMode))}</span></strong>
                   <pre><code>${escapeHtml(preview.command)}</code></pre>
                   <div class="command-action-buttons">
-                    <button class="button primary" type="button" data-open-command="${index}">
-                      <i data-lucide="terminal"></i>Ouvrir PowerShell
-                    </button>
+                    ${
+                      preview.commandMode === "manual"
+                        ? `<button class="button primary" type="button" data-open-command="${index}">
+                            <i data-lucide="terminal"></i>Ouvrir PowerShell
+                          </button>`
+                        : ""
+                    }
                     <button class="button secondary" type="button" data-copy-command="${index}">
                       <i data-lucide="copy"></i>Copier
                     </button>
@@ -888,6 +1010,7 @@ function bindEvents() {
 
   document.querySelector<HTMLButtonElement>("#open-command-modal")?.addEventListener("click", () => {
     state.actionsOpen = false;
+    resetCommandDraft();
     state.commandModalOpen = true;
     render();
   });
@@ -900,6 +1023,7 @@ function bindEvents() {
 
   document.querySelector<HTMLButtonElement>("#close-command-modal")?.addEventListener("click", () => {
     state.commandModalOpen = false;
+    resetCommandDraft();
     render();
   });
 
@@ -962,48 +1086,80 @@ function bindEvents() {
     render();
   });
 
+  bindCommandDraftEvents();
+
   document.querySelector<HTMLFormElement>("#add-command-form")?.addEventListener("submit", (event) => {
     event.preventDefault();
     const form = new FormData(event.currentTarget as HTMLFormElement);
+    const mode = String(form.get("commandMode") ?? state.commandDraftMode) as CommandMode;
+    const commandInputSteps = state.commandDraftSteps;
+    const editingCommandSkillId = state.editingCommandSkillId;
     withTask(async () => {
       if (!isTauriRuntime()) {
-        const skill: Skill = {
-          id: `demo/${String(form.get("name") ?? "command").toLowerCase().replace(/\s+/g, "-")}`,
-          name: String(form.get("name") ?? ""),
-          description: String(form.get("description") ?? ""),
-          sourceType: "command",
-          installCommand: String(form.get("command") ?? ""),
-          libraryPath: null,
-          version: "demo",
-          tags: String(form.get("tags") ?? "")
-            .split(",")
-            .map((tag) => tag.trim())
-            .filter(Boolean),
-        };
-        state.catalog.skills = [...state.catalog.skills, skill];
+        const existing = state.catalog.skills.find((item) => item.id === editingCommandSkillId);
+        const skill: Skill = existing
+          ? {
+              ...existing,
+              commandMode: mode,
+              commandInputSteps,
+            }
+          : {
+              id: `demo/${String(form.get("name") ?? "command").toLowerCase().replace(/\s+/g, "-")}`,
+              name: String(form.get("name") ?? ""),
+              description: String(form.get("description") ?? ""),
+              sourceType: "command",
+              installCommand: String(form.get("command") ?? ""),
+              commandMode: mode,
+              commandInputSteps,
+              libraryPath: null,
+              version: "demo",
+              tags: String(form.get("tags") ?? "")
+                .split(",")
+                .map((tag) => tag.trim())
+                .filter(Boolean),
+            };
+        state.catalog.skills = existing
+          ? state.catalog.skills.map((item) => (item.id === existing.id ? skill : item))
+          : [...state.catalog.skills, skill];
         state.view = "skills";
         state.selectedSkillId = skill.id;
         state.commandModalOpen = false;
-        state.notice = `Skill ajoute en apercu: ${skill.name}`;
+        resetCommandDraft();
+        state.notice = existing
+          ? `Commande modifiee en apercu: ${skill.name}`
+          : `Skill ajoute en apercu: ${skill.name}`;
         return;
       }
 
-      const skill = await invoke<Skill>("add_command_skill", {
-        input: {
-          name: String(form.get("name") ?? ""),
-          description: String(form.get("description") ?? ""),
-          command: String(form.get("command") ?? ""),
-          tags: String(form.get("tags") ?? "")
-            .split(",")
-            .map((tag) => tag.trim())
-            .filter(Boolean),
-        },
-      });
+      const skill = editingCommandSkillId
+        ? await invoke<Skill>("update_command_skill", {
+            input: {
+              skillRef: editingCommandSkillId,
+              commandMode: mode,
+              commandInputSteps,
+            },
+          })
+        : await invoke<Skill>("add_command_skill", {
+            input: {
+              name: String(form.get("name") ?? ""),
+              description: String(form.get("description") ?? ""),
+              command: String(form.get("command") ?? ""),
+              commandMode: mode,
+              commandInputSteps,
+              tags: String(form.get("tags") ?? "")
+                .split(",")
+                .map((tag) => tag.trim())
+                .filter(Boolean),
+            },
+          });
       await refreshCatalog();
       state.view = "skills";
       state.selectedSkillId = skill.id;
       state.commandModalOpen = false;
-      state.notice = `Skill ajoute: ${skill.name}`;
+      resetCommandDraft();
+      state.notice = editingCommandSkillId
+        ? `Commande modifiee: ${skill.name}`
+        : `Skill ajoute: ${skill.name}`;
     });
   });
 
@@ -1012,6 +1168,14 @@ function bindEvents() {
     state.installMode = "skill";
     state.installReference = state.selectedSkillId;
     state.selectedSkillId = "";
+    render();
+  });
+
+  document.querySelector<HTMLButtonElement>("#edit-command-selected")?.addEventListener("click", () => {
+    const skill = selectedSkill();
+    if (!skill || skill.sourceType !== "command") return;
+    resetCommandDraft(skill);
+    state.commandModalOpen = true;
     render();
   });
 
@@ -1191,6 +1355,63 @@ function bindEvents() {
   });
 }
 
+function bindCommandDraftEvents() {
+  document
+    .querySelector<HTMLInputElement>("#add-command-form input[name='name']")
+    ?.addEventListener("input", (event) => {
+      state.commandDraftName = (event.target as HTMLInputElement).value;
+    });
+  document
+    .querySelector<HTMLInputElement>("#add-command-form input[name='description']")
+    ?.addEventListener("input", (event) => {
+      state.commandDraftDescription = (event.target as HTMLInputElement).value;
+    });
+  document
+    .querySelector<HTMLTextAreaElement>("#add-command-form textarea[name='command']")
+    ?.addEventListener("input", (event) => {
+      state.commandDraftCommand = (event.target as HTMLTextAreaElement).value;
+    });
+  document
+    .querySelector<HTMLInputElement>("#add-command-form input[name='tags']")
+    ?.addEventListener("input", (event) => {
+      state.commandDraftTags = (event.target as HTMLInputElement).value;
+    });
+  document.querySelector<HTMLSelectElement>("#command-mode")?.addEventListener("change", (event) => {
+    state.commandDraftMode = (event.target as HTMLSelectElement).value as CommandMode;
+    render();
+  });
+
+  document.querySelector<HTMLButtonElement>("#add-step-enter")?.addEventListener("click", () => {
+    state.commandDraftSteps = [...state.commandDraftSteps, { type: "enter" }];
+    render();
+  });
+  document.querySelector<HTMLButtonElement>("#add-step-text")?.addEventListener("click", () => {
+    const value = prompt("Texte");
+    if (value === null) return;
+    state.commandDraftSteps = [...state.commandDraftSteps, { type: "text", value }];
+    render();
+  });
+  document.querySelector<HTMLButtonElement>("#add-step-delay")?.addEventListener("click", () => {
+    const raw = prompt("Delai en ms", "500");
+    if (raw === null) return;
+    const value = Number.parseInt(raw, 10);
+    if (!Number.isFinite(value) || value < 0) {
+      state.error = "Delai invalide.";
+      render();
+      return;
+    }
+    state.commandDraftSteps = [...state.commandDraftSteps, { type: "delayMs", value }];
+    render();
+  });
+  document.querySelectorAll<HTMLButtonElement>("[data-remove-step]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const index = Number(button.dataset.removeStep);
+      state.commandDraftSteps = state.commandDraftSteps.filter((_, stepIndex) => stepIndex !== index);
+      render();
+    });
+  });
+}
+
 async function copyText(value: string) {
   try {
     if (navigator.clipboard?.writeText) {
@@ -1234,7 +1455,7 @@ async function installCurrentSelection() {
   });
   state.pendingCommandActions = outcome.commandPreviews;
   state.notice = outcome.commandPreviews.length
-    ? `${outcome.installedSkills.length} element(s) installe(s). Commandes restantes a lancer dans PowerShell.`
+    ? `${outcome.installedSkills.length} element(s) installe(s). Commandes restantes a traiter.`
     : `${outcome.installedSkills.length} element(s) installe(s) vers ${outcome.targetDir}`;
 }
 

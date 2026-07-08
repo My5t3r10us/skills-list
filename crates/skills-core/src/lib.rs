@@ -2,9 +2,11 @@ use directories::BaseDirs;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fs;
-use std::io;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::thread;
+use std::time::Duration;
 use thiserror::Error;
 
 pub const SCHEMA_VERSION: u32 = 1;
@@ -21,6 +23,8 @@ pub enum SkillsError {
     Yaml(#[from] serde_yaml::Error),
     #[error("skill not found: {0}")]
     SkillNotFound(String),
+    #[error("not a command skill: {0}")]
+    NotCommandSkill(String),
     #[error("group not found: {0}")]
     GroupNotFound(String),
     #[error("invalid skill folder: {0}")]
@@ -42,6 +46,23 @@ pub enum SourceType {
     Command,
 }
 
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum CommandMode {
+    #[default]
+    Manual,
+    Stdin,
+    Preview,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum CommandInputStep {
+    Enter,
+    Text { value: String },
+    DelayMs { value: u64 },
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct Skill {
@@ -52,6 +73,10 @@ pub struct Skill {
     pub source_type: SourceType,
     pub library_path: Option<PathBuf>,
     pub install_command: Option<String>,
+    #[serde(default)]
+    pub command_mode: CommandMode,
+    #[serde(default)]
+    pub command_input_steps: Vec<CommandInputStep>,
     pub tags: Vec<String>,
 }
 
@@ -88,6 +113,8 @@ pub struct InstallCommandPreview {
     pub skill_id: String,
     pub skill_name: String,
     pub command: String,
+    pub command_mode: CommandMode,
+    pub command_input_steps: Vec<CommandInputStep>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -219,6 +246,8 @@ impl SkillsStore {
             parsed.library_path = Some(destination);
             parsed.source_type = SourceType::Local;
             parsed.install_command = None;
+            parsed.command_mode = CommandMode::Manual;
+            parsed.command_input_steps = Vec::new();
             self.catalog.skills.push(parsed.clone());
             imported.push(parsed);
         }
@@ -232,6 +261,8 @@ impl SkillsStore {
         name: String,
         description: String,
         command: String,
+        command_mode: CommandMode,
+        command_input_steps: Vec<CommandInputStep>,
         tags: Vec<String>,
     ) -> Result<Skill> {
         let id = self.unique_skill_id(&slugify(&name));
@@ -243,10 +274,35 @@ impl SkillsStore {
             source_type: SourceType::Command,
             library_path: None,
             install_command: Some(command),
+            command_mode,
+            command_input_steps,
             tags,
         };
 
         self.catalog.skills.push(skill.clone());
+        self.save()?;
+        Ok(skill)
+    }
+
+    pub fn update_command_skill(
+        &mut self,
+        skill_ref: &str,
+        command_mode: Option<CommandMode>,
+        command_input_steps: Option<Vec<CommandInputStep>>,
+    ) -> Result<Skill> {
+        let skill = self.find_skill_mut(skill_ref)?;
+        if skill.source_type != SourceType::Command {
+            return Err(SkillsError::NotCommandSkill(skill_ref.to_string()));
+        }
+
+        if let Some(command_mode) = command_mode {
+            skill.command_mode = command_mode;
+        }
+        if let Some(command_input_steps) = command_input_steps {
+            skill.command_input_steps = command_input_steps;
+        }
+
+        let skill = skill.clone();
         self.save()?;
         Ok(skill)
     }
@@ -462,32 +518,56 @@ impl SkillsStore {
                 let command = skill.install_command.clone().unwrap_or_default();
                 match command_mode {
                     CommandExecutionMode::PreviewOnly => {
-                        outcome.command_previews.push(InstallCommandPreview {
-                            skill_id: skill.id.clone(),
-                            skill_name: skill.name.clone(),
-                            command,
-                        });
+                        push_command_preview(outcome, skill, command);
                     }
-                    CommandExecutionMode::Captured => {
-                        run_install_command_captured(&command, project_path)?;
-                        outcome.installed_skills.push(InstalledSkill {
-                            skill_id: skill.id.clone(),
-                            skill_name: skill.name.clone(),
-                            target_path: None,
-                            command: Some(command),
-                            executed: true,
-                        });
-                    }
-                    CommandExecutionMode::InteractiveTerminal => {
-                        run_install_command_interactive(&command, project_path)?;
-                        outcome.installed_skills.push(InstalledSkill {
-                            skill_id: skill.id.clone(),
-                            skill_name: skill.name.clone(),
-                            target_path: None,
-                            command: Some(command),
-                            executed: true,
-                        });
-                    }
+                    CommandExecutionMode::Captured => match skill.command_mode {
+                        CommandMode::Stdin => {
+                            run_install_command_with_stdin(
+                                &command,
+                                project_path,
+                                &skill.command_input_steps,
+                            )?;
+                            outcome.installed_skills.push(InstalledSkill {
+                                skill_id: skill.id.clone(),
+                                skill_name: skill.name.clone(),
+                                target_path: None,
+                                command: Some(command),
+                                executed: true,
+                            });
+                        }
+                        CommandMode::Manual | CommandMode::Preview => {
+                            push_command_preview(outcome, skill, command);
+                        }
+                    },
+                    CommandExecutionMode::InteractiveTerminal => match skill.command_mode {
+                        CommandMode::Manual => {
+                            run_install_command_interactive(&command, project_path)?;
+                            outcome.installed_skills.push(InstalledSkill {
+                                skill_id: skill.id.clone(),
+                                skill_name: skill.name.clone(),
+                                target_path: None,
+                                command: Some(command),
+                                executed: true,
+                            });
+                        }
+                        CommandMode::Stdin => {
+                            run_install_command_with_stdin(
+                                &command,
+                                project_path,
+                                &skill.command_input_steps,
+                            )?;
+                            outcome.installed_skills.push(InstalledSkill {
+                                skill_id: skill.id.clone(),
+                                skill_name: skill.name.clone(),
+                                target_path: None,
+                                command: Some(command),
+                                executed: true,
+                            });
+                        }
+                        CommandMode::Preview => {
+                            push_command_preview(outcome, skill, command);
+                        }
+                    },
                 }
             }
         }
@@ -498,6 +578,14 @@ impl SkillsStore {
         self.catalog
             .skills
             .iter()
+            .find(|skill| matches_skill(skill, skill_ref))
+            .ok_or_else(|| SkillsError::SkillNotFound(skill_ref.to_string()))
+    }
+
+    fn find_skill_mut(&mut self, skill_ref: &str) -> Result<&mut Skill> {
+        self.catalog
+            .skills
+            .iter_mut()
             .find(|skill| matches_skill(skill, skill_ref))
             .ok_or_else(|| SkillsError::SkillNotFound(skill_ref.to_string()))
     }
@@ -570,6 +658,8 @@ pub fn parse_skill_folder(folder: impl AsRef<Path>) -> Result<Skill> {
         source_type: SourceType::Local,
         library_path: Some(folder.to_path_buf()),
         install_command: None,
+        command_mode: CommandMode::Manual,
+        command_input_steps: Vec::new(),
         tags: frontmatter.tags.unwrap_or_default(),
     })
 }
@@ -673,14 +763,43 @@ fn run_install_command_interactive(command: &str, project_path: Option<&Path>) -
     }
 }
 
-fn run_install_command_captured(command: &str, project_path: Option<&Path>) -> Result<()> {
+fn run_install_command_with_stdin(
+    command: &str,
+    project_path: Option<&Path>,
+    steps: &[CommandInputStep],
+) -> Result<()> {
     let mut process = install_command_process(command, project_path);
-    let output = process.output()?;
-    if output.status.success() {
+    process
+        .stdin(Stdio::piped())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit());
+
+    let mut child = process.spawn()?;
+    if let Some(mut stdin) = child.stdin.take() {
+        for step in steps {
+            match step {
+                CommandInputStep::Enter => {
+                    stdin.write_all(b"\n")?;
+                    stdin.flush()?;
+                }
+                CommandInputStep::Text { value } => {
+                    stdin.write_all(value.as_bytes())?;
+                    stdin.flush()?;
+                }
+                CommandInputStep::DelayMs { value } => {
+                    thread::sleep(Duration::from_millis(*value));
+                }
+            }
+        }
+    }
+
+    let status = child.wait()?;
+    if status.success() {
         Ok(())
     } else {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        Err(SkillsError::CommandFailed(stderr.trim().to_string()))
+        Err(SkillsError::CommandFailed(format!(
+            "command exited with status {status}"
+        )))
     }
 }
 
@@ -755,7 +874,19 @@ fn command_preview_for_skill(skill: &Skill) -> Option<InstallCommandPreview> {
         skill_id: skill.id.clone(),
         skill_name: skill.name.clone(),
         command: skill.install_command.clone().unwrap_or_default(),
+        command_mode: skill.command_mode.clone(),
+        command_input_steps: skill.command_input_steps.clone(),
     })
+}
+
+fn push_command_preview(outcome: &mut InstallationOutcome, skill: &Skill, command: String) {
+    outcome.command_previews.push(InstallCommandPreview {
+        skill_id: skill.id.clone(),
+        skill_name: skill.name.clone(),
+        command,
+        command_mode: skill.command_mode.clone(),
+        command_input_steps: skill.command_input_steps.clone(),
+    });
 }
 
 #[cfg(test)]
@@ -794,6 +925,32 @@ mod tests {
         let data_dir = AppPaths::default_data_dir().unwrap();
 
         assert_eq!(data_dir.file_name().unwrap(), APP_IDENTIFIER);
+    }
+
+    #[test]
+    fn old_catalog_defaults_command_config_to_manual() {
+        let raw = r#"{
+          "schemaVersion": 1,
+          "skills": [
+            {
+              "id": "create-readme",
+              "name": "create-readme",
+              "description": "Install README skill",
+              "version": null,
+              "sourceType": "command",
+              "libraryPath": null,
+              "installCommand": "npx skills add repo --skill create-readme",
+              "tags": []
+            }
+          ],
+          "groups": []
+        }"#;
+
+        let catalog: Catalog = serde_json::from_str(raw).unwrap();
+        let skill = &catalog.skills[0];
+
+        assert_eq!(skill.command_mode, CommandMode::Manual);
+        assert!(skill.command_input_steps.is_empty());
     }
 
     #[test]

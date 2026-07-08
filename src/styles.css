@@ -603,7 +603,8 @@ code {
 .form-card textarea,
 .form-card select,
 .modal input,
-.modal textarea {
+.modal textarea,
+.modal select {
   width: 100%;
   min-height: 36px;
   border: 1px solid #d7dbd4;
@@ -621,6 +622,7 @@ code {
 .form-card select:focus,
 .modal input:focus,
 .modal textarea:focus,
+.modal select:focus,
 .search:focus-within {
   border-color: #8b948d;
   box-shadow: 0 0 0 3px rgba(23, 26, 24, 0.08);
@@ -841,6 +843,76 @@ code {
 
 .command-modal {
   width: min(720px, 100%);
+}
+
+.command-editor-modal {
+  width: min(560px, 100%);
+}
+
+.steps-editor {
+  display: grid;
+  gap: 8px;
+  border: 1px solid #e2e5df;
+  border-radius: 8px;
+  background: #fafbf9;
+  padding: 10px;
+}
+
+.steps-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.steps-header strong {
+  color: #202420;
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.step-buttons,
+.step-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.step-buttons .button {
+  min-height: 30px;
+  padding: 0 9px;
+  font-size: 12px;
+}
+
+.step-list {
+  display: grid;
+}
+
+.step-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 30px;
+  align-items: center;
+  gap: 8px;
+  min-height: 34px;
+  border: 1px solid #e2e5df;
+  border-radius: 7px;
+  background: #ffffff;
+  padding: 5px 5px 5px 9px;
+}
+
+.step-row span,
+.step-empty {
+  overflow: hidden;
+  color: #4c534e;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+}
+
+.step-empty {
+  border: 1px dashed #d7dbd4;
+  border-radius: 7px;
+  padding: 9px;
 }
 
 .command-actions {

@@ -1,6 +1,8 @@
 use anyhow::{bail, Result};
-use clap::{Args, Parser, Subcommand};
-use skills_core::{CommandExecutionMode, InstallationOutcome, Skill, SkillsStore};
+use clap::{Args, Parser, Subcommand, ValueEnum};
+use skills_core::{
+    CommandExecutionMode, CommandInputStep, CommandMode, InstallationOutcome, Skill, SkillsStore,
+};
 use std::io::{self, Write};
 use std::path::PathBuf;
 
@@ -20,6 +22,7 @@ enum Commands {
     Search(SearchArgs),
     Import(PathArg),
     AddCommand(AddCommandArgs),
+    UpdateCommand(UpdateCommandArgs),
     Group {
         #[command(subcommand)]
         command: GroupCommands,
@@ -49,8 +52,40 @@ struct AddCommandArgs {
     description: String,
     #[arg(long = "command")]
     install_command: String,
+    #[arg(long = "mode", value_enum, default_value = "manual")]
+    mode: CommandModeArg,
+    #[arg(long = "input")]
+    inputs: Vec<String>,
     #[arg(long = "tag")]
     tags: Vec<String>,
+}
+
+#[derive(Args)]
+struct UpdateCommandArgs {
+    skill: String,
+    #[arg(long = "mode", value_enum)]
+    mode: Option<CommandModeArg>,
+    #[arg(long)]
+    clear_inputs: bool,
+    #[arg(long = "input")]
+    inputs: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum CommandModeArg {
+    Manual,
+    Stdin,
+    Preview,
+}
+
+impl From<CommandModeArg> for CommandMode {
+    fn from(value: CommandModeArg) -> Self {
+        match value {
+            CommandModeArg::Manual => CommandMode::Manual,
+            CommandModeArg::Stdin => CommandMode::Stdin,
+            CommandModeArg::Preview => CommandMode::Preview,
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -109,6 +144,7 @@ fn main() -> Result<()> {
         Commands::Search(args) => search(&store, args),
         Commands::Import(args) => import(&mut store, args),
         Commands::AddCommand(args) => add_command(&mut store, args),
+        Commands::UpdateCommand(args) => update_command(&mut store, args),
         Commands::Group { command } => group(&mut store, command),
         Commands::Install { command } => install(&store, command),
     }
@@ -141,10 +177,58 @@ fn import(store: &mut SkillsStore, args: PathArg) -> Result<()> {
 }
 
 fn add_command(store: &mut SkillsStore, args: AddCommandArgs) -> Result<()> {
-    let skill =
-        store.add_command_skill(args.name, args.description, args.install_command, args.tags)?;
+    let input_steps = parse_command_input_steps(&args.inputs)?;
+    let skill = store.add_command_skill(
+        args.name,
+        args.description,
+        args.install_command,
+        args.mode.into(),
+        input_steps,
+        args.tags,
+    )?;
     println!("Added command skill {} ({})", skill.name, skill.id);
     Ok(())
+}
+
+fn update_command(store: &mut SkillsStore, args: UpdateCommandArgs) -> Result<()> {
+    let input_steps = if args.clear_inputs || !args.inputs.is_empty() {
+        Some(parse_command_input_steps(&args.inputs)?)
+    } else {
+        None
+    };
+    let skill = store.update_command_skill(&args.skill, args.mode.map(Into::into), input_steps)?;
+    println!("Updated command skill {} ({})", skill.name, skill.id);
+    Ok(())
+}
+
+fn parse_command_input_steps(inputs: &[String]) -> Result<Vec<CommandInputStep>> {
+    inputs
+        .iter()
+        .map(|input| {
+            if input == "enter" {
+                return Ok(CommandInputStep::Enter);
+            }
+
+            if let Some(value) = input.strip_prefix("text:") {
+                return Ok(CommandInputStep::Text {
+                    value: value.to_string(),
+                });
+            }
+
+            if let Some(value) = input
+                .strip_prefix("delay:")
+                .or_else(|| input.strip_prefix("delayMs:"))
+            {
+                let value = value.parse::<u64>()?;
+                return Ok(CommandInputStep::DelayMs { value });
+            }
+
+            bail!(
+                "invalid --input value '{}'. Use enter, text:<value>, delay:<ms>, or delayMs:<ms>",
+                input
+            );
+        })
+        .collect()
 }
 
 fn group(store: &mut SkillsStore, command: GroupCommands) -> Result<()> {
@@ -215,6 +299,13 @@ fn command_execution_mode(
     for command in &previews {
         println!("Install command for {}:", command.skill_name);
         println!("{}", command.command);
+    }
+
+    if previews
+        .iter()
+        .all(|command| command.command_mode == CommandMode::Preview)
+    {
+        return Ok(CommandExecutionMode::PreviewOnly);
     }
 
     if args.yes {

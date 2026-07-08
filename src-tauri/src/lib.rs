@@ -1,7 +1,7 @@
 use serde::Deserialize;
 use skills_core::{
-    Catalog, CommandExecutionMode, InstallCommandPreview, InstallationOutcome, Skill, SkillGroup,
-    SkillsStore,
+    Catalog, CommandExecutionMode, CommandInputStep, CommandMode, InstallCommandPreview,
+    InstallationOutcome, Skill, SkillGroup, SkillsStore,
 };
 use std::path::PathBuf;
 use std::process::Command;
@@ -21,7 +21,19 @@ struct CommandSkillInput {
     name: String,
     description: String,
     command: String,
+    #[serde(default)]
+    command_mode: CommandMode,
+    #[serde(default)]
+    command_input_steps: Vec<CommandInputStep>,
     tags: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateCommandSkillInput {
+    skill_ref: String,
+    command_mode: Option<CommandMode>,
+    command_input_steps: Option<Vec<CommandInputStep>>,
 }
 
 #[derive(Deserialize)]
@@ -71,7 +83,26 @@ fn import_path(app: AppHandle, path: String) -> Result<Vec<Skill>, String> {
 fn add_command_skill(app: AppHandle, input: CommandSkillInput) -> Result<Skill, String> {
     let mut store = app_store(&app)?;
     store
-        .add_command_skill(input.name, input.description, input.command, input.tags)
+        .add_command_skill(
+            input.name,
+            input.description,
+            input.command,
+            input.command_mode,
+            input.command_input_steps,
+            input.tags,
+        )
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn update_command_skill(app: AppHandle, input: UpdateCommandSkillInput) -> Result<Skill, String> {
+    let mut store = app_store(&app)?;
+    store
+        .update_command_skill(
+            &input.skill_ref,
+            input.command_mode,
+            input.command_input_steps,
+        )
         .map_err(|error| error.to_string())
 }
 
@@ -172,7 +203,7 @@ fn install_skill(app: AppHandle, input: InstallSkillInput) -> Result<Installatio
             input.project_path.map(PathBuf::from),
             input.target_path.map(PathBuf::from),
             input.overwrite,
-            CommandExecutionMode::PreviewOnly,
+            CommandExecutionMode::Captured,
         )
         .map_err(|error| error.to_string())
 }
@@ -186,7 +217,7 @@ fn install_group(app: AppHandle, input: InstallGroupInput) -> Result<Installatio
             input.project_path.map(PathBuf::from),
             input.target_path.map(PathBuf::from),
             input.overwrite,
-            CommandExecutionMode::PreviewOnly,
+            CommandExecutionMode::Captured,
         )
         .map_err(|error| error.to_string())
 }
@@ -222,6 +253,7 @@ pub fn run() {
             search_skills,
             import_path,
             add_command_skill,
+            update_command_skill,
             delete_skill,
             export_skill,
             create_group,

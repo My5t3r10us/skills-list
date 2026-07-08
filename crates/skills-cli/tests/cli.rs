@@ -204,6 +204,145 @@ fn command_skill_can_read_stdin_with_yes() {
 }
 
 #[test]
+fn command_skill_can_inject_configured_stdin_steps() {
+    let temp = tempdir().unwrap();
+    let data_dir = temp.path().join("data");
+    let project = temp.path().join("project");
+    fs::create_dir_all(&project).unwrap();
+    let script = temp.path().join(if cfg!(windows) {
+        "stdin-steps.cmd"
+    } else {
+        "stdin-steps.sh"
+    });
+    if cfg!(windows) {
+        fs::write(
+            &script,
+            "@echo off\r\nset /p value=\r\necho step:%value%\r\n",
+        )
+        .unwrap();
+    } else {
+        fs::write(&script, "read value\necho step:$value\n").unwrap();
+    }
+    let command = if cfg!(windows) {
+        script.display().to_string()
+    } else {
+        format!("sh {}", script.display())
+    };
+
+    bin()
+        .args([
+            "--data-dir",
+            data_dir.to_str().unwrap(),
+            "add-command",
+            "Stdin Skill",
+            "--description",
+            "Reads configured stdin",
+            "--command",
+        ])
+        .arg(&command)
+        .args([
+            "--mode",
+            "stdin",
+            "--input",
+            "text:hello",
+            "--input",
+            "enter",
+        ])
+        .assert()
+        .success();
+
+    bin()
+        .args([
+            "--data-dir",
+            data_dir.to_str().unwrap(),
+            "install",
+            "skill",
+            "stdin-skill",
+            "--project",
+            project.to_str().unwrap(),
+            "--yes",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("step:hello"));
+}
+
+#[test]
+fn update_command_replaces_configured_stdin_steps() {
+    let temp = tempdir().unwrap();
+    let data_dir = temp.path().join("data");
+    let project = temp.path().join("project");
+    fs::create_dir_all(&project).unwrap();
+    let script = temp.path().join(if cfg!(windows) {
+        "updated-steps.cmd"
+    } else {
+        "updated-steps.sh"
+    });
+    if cfg!(windows) {
+        fs::write(
+            &script,
+            "@echo off\r\nset /p value=\r\necho updated:%value%\r\n",
+        )
+        .unwrap();
+    } else {
+        fs::write(&script, "read value\necho updated:$value\n").unwrap();
+    }
+    let command = if cfg!(windows) {
+        script.display().to_string()
+    } else {
+        format!("sh {}", script.display())
+    };
+
+    bin()
+        .args([
+            "--data-dir",
+            data_dir.to_str().unwrap(),
+            "add-command",
+            "Updated Stdin",
+            "--description",
+            "Will be updated",
+            "--command",
+        ])
+        .arg(&command)
+        .assert()
+        .success();
+    bin()
+        .args([
+            "--data-dir",
+            data_dir.to_str().unwrap(),
+            "update-command",
+            "updated-stdin",
+            "--mode",
+            "stdin",
+            "--clear-inputs",
+            "--input",
+            "text:bonjour",
+            "--input",
+            "enter",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Updated command skill Updated Stdin",
+        ));
+
+    bin()
+        .args([
+            "--data-dir",
+            data_dir.to_str().unwrap(),
+            "install",
+            "skill",
+            "updated-stdin",
+            "--project",
+            project.to_str().unwrap(),
+            "--yes",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("updated:bonjour"));
+}
+
+#[test]
 fn refuses_overwrite_without_flag() {
     let temp = tempdir().unwrap();
     let data_dir = temp.path().join("data");
